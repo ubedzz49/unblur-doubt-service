@@ -1,16 +1,13 @@
 import Fastify, { FastifyInstance } from "fastify";
 import { CreateDoubtInput, Doubt, DoubtRepository, DoubtStatus, FeedFilters, InMemoryDoubtRepository } from "./doubts/repository.js";
 import { FakeMatchingClient, MatchingClient } from "./matching/client.js";
-import { FakeInferenceClient, InferenceClient } from "./matching/infer-client.js";
-import { FakeTaxonomyClient, TaxonomyClient } from "./taxonomy/custom-client.js";
 import { FeedCache, InMemoryFeedCache } from "./cache/feed-cache.js";
 
 interface CreateDoubtBody {
   authorUserId?: string;
   title?: string;
   description?: string;
-  expertiseLevelId?: string;
-  autoDetect?: boolean;
+  expertiseLevelIds?: string[];
 }
 
 interface UpdateStatusBody {
@@ -44,8 +41,6 @@ export function buildApp(
   doubtRepository: DoubtRepository = new InMemoryDoubtRepository(),
   matchingClient: MatchingClient = new FakeMatchingClient(),
   feedCache: FeedCache<FeedEntry> = new InMemoryFeedCache<FeedEntry>(),
-  inferenceClient: InferenceClient = new FakeInferenceClient(),
-  taxonomyClient: TaxonomyClient = new FakeTaxonomyClient(),
 ): FastifyInstance {
   const app = Fastify({
     logger: process.env.NODE_ENV === "test" ? false : { level: process.env.LOG_LEVEL ?? "info" },
@@ -54,55 +49,23 @@ export function buildApp(
   app.get("/healthz", async () => ({ status: "ok" }));
 
   app.post<{ Body: CreateDoubtBody }>("/doubts", async (request, reply) => {
-    const { authorUserId, title, description, expertiseLevelId, autoDetect } = request.body ?? {};
+    const { authorUserId, title, description, expertiseLevelIds } = request.body ?? {};
     if (!authorUserId || !title) {
       request.log.warn("create doubt rejected: missing required field");
       return reply.code(400).send({ error: "authorUserId and title are required" });
     }
 
-    const trimmedDescription = description !== undefined ? description.trim() : undefined;
-
-    let resolvedExpertiseLevelId: string;
-    let autoDetected = false;
-
-    if (expertiseLevelId) {
-      resolvedExpertiseLevelId = expertiseLevelId;
-    } else if (autoDetect !== true) {
-      return reply.code(400).send({ error: "expertiseLevelId is required, or set autoDetect to true" });
-    } else {
-      // Auto-detect path. Unlike the feed's related-expertise expansion, there is no graceful
-      // degradation available here: if inference or taxonomy creation fails, there is simply no
-      // subject to create the doubt with, so both failure modes are hard errors (502) rather
-      // than silent fallbacks.
-      let inferResult;
-      try {
-        inferResult = await inferenceClient.inferExpertise(title, trimmedDescription);
-      } catch (err) {
-        request.log.warn({ err }, "infer-expertise call failed, cannot auto-detect subject");
-        return reply.code(502).send({ error: "auto-detect is temporarily unavailable, please pick a subject" });
-      }
-
-      if (inferResult.matched) {
-        resolvedExpertiseLevelId = inferResult.expertiseLevelId;
-      } else {
-        const authHeader = request.headers.authorization;
-        try {
-          const created = await taxonomyClient.createCustom(authHeader ?? "", inferResult.suggestedLabel);
-          resolvedExpertiseLevelId = created.expertiseLevelId;
-        } catch (err) {
-          request.log.warn({ err }, "expertise-options/custom call failed, cannot create new subject");
-          return reply.code(502).send({ error: "couldn't create a new subject for auto-detect, please pick one manually" });
-        }
-      }
-      autoDetected = true;
+    if (!expertiseLevelIds || expertiseLevelIds.length === 0) {
+      return reply.code(400).send({ error: "at least one expertiseLevelId is required" });
     }
+
+    const trimmedDescription = description !== undefined ? description.trim() : undefined;
 
     const input: CreateDoubtInput = {
       authorUserId,
       title,
       description: trimmedDescription,
-      expertiseLevelId: resolvedExpertiseLevelId,
-      autoDetected,
+      expertiseLevelIds: Array.from(new Set(expertiseLevelIds)),
     };
     const doubt = await doubtRepository.create(input);
     request.log.info({ doubtId: doubt.id }, "doubt created");
@@ -186,6 +149,7 @@ export function buildApp(
     }
     request.log.debug({ cacheKey }, "feed cache miss");
 
+    // a doubt is an exact match if ANY of its expertiseLevelIds intersects the viewer's set
     const exactDoubts = await doubtRepository.listByLevels(exactLevelIds, status, filters);
     const exactIds = new Set(exactDoubts.map((d) => d.id));
     const exactTagged = exactDoubts.map((d) => ({ ...d, matchType: "exact" as const }));
@@ -204,6 +168,8 @@ export function buildApp(
       }
     }
 
+    // a doubt not already an exact match is a related match if ANY of its expertiseLevelIds
+    // falls in the related-expansion set
     let relatedTagged: FeedEntry[] = [];
     if (relatedLevelIds.size > 0) {
       const relatedDoubts = await doubtRepository.listByLevels(Array.from(relatedLevelIds), status, filters);

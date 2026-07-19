@@ -4,8 +4,6 @@ import { buildDbPool } from "./db/pool.js";
 import { runMigrations } from "./db/migrate.js";
 import { PostgresDoubtRepository } from "./doubts/postgres-repository.js";
 import { HttpMatchingClient } from "./matching/client.js";
-import { HttpInferenceClient } from "./matching/infer-client.js";
-import { HttpTaxonomyClient } from "./taxonomy/custom-client.js";
 import { RedisFeedCache } from "./cache/feed-cache.js";
 import { logger } from "./logger.js";
 
@@ -27,8 +25,6 @@ runMigrations(dbPool)
       new PostgresDoubtRepository(dbPool),
       new HttpMatchingClient(),
       new RedisFeedCache(buildRedisClient()),
-      new HttpInferenceClient(),
-      new HttpTaxonomyClient(),
     );
     return app.listen({ port, host: "0.0.0.0" }).then(() => app.log.info({ port }, "doubt-service listening"));
   })

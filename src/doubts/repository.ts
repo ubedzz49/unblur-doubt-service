@@ -5,9 +5,8 @@ export interface Doubt {
   authorUserId: string;
   title: string;
   description: string | null;
-  expertiseLevelId: string;
+  expertiseLevelIds: string[];
   status: DoubtStatus;
-  autoDetected: boolean;
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
@@ -17,8 +16,7 @@ export interface CreateDoubtInput {
   authorUserId: string;
   title: string;
   description?: string;
-  expertiseLevelId: string;
-  autoDetected?: boolean;
+  expertiseLevelIds: string[];
 }
 
 // optional feed filters, applied on top of the expertiseLevelIds/status match
@@ -34,8 +32,8 @@ export interface DoubtRepository {
   getById(id: string): Promise<Doubt | null>;
   updateStatus(id: string, status: DoubtStatus): Promise<Doubt | null>;
   listByAuthor(authorUserId: string): Promise<Doubt[]>;
-  // doubts for the given expertise levels and status, newest first, optionally
-  // narrowed by topic/createdAfter filters
+  // doubts that have any of the given expertise levels tagged, for the given status, newest
+  // first, optionally narrowed by topic/createdAfter filters
   listByLevels(expertiseLevelIds: string[], status: DoubtStatus, filters?: FeedFilters): Promise<Doubt[]>;
 }
 
@@ -66,9 +64,8 @@ export class InMemoryDoubtRepository implements DoubtRepository {
       authorUserId: input.authorUserId,
       title: input.title,
       description: input.description ?? null,
-      expertiseLevelId: input.expertiseLevelId,
+      expertiseLevelIds: Array.from(new Set(input.expertiseLevelIds)),
       status: "open",
-      autoDetected: input.autoDetected ?? false,
       createdAt: now,
       updatedAt: now,
       resolvedAt: null,
@@ -103,7 +100,9 @@ export class InMemoryDoubtRepository implements DoubtRepository {
   async listByLevels(expertiseLevelIds: string[], status: DoubtStatus, filters?: FeedFilters): Promise<Doubt[]> {
     const levelSet = new Set(expertiseLevelIds);
     return Array.from(this.rows.values())
-      .filter((d) => d.status === status && levelSet.has(d.expertiseLevelId) && matchesFilters(d, filters))
+      .filter(
+        (d) => d.status === status && d.expertiseLevelIds.some((id) => levelSet.has(id)) && matchesFilters(d, filters),
+      )
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }
