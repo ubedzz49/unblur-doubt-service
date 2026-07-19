@@ -146,3 +146,33 @@ being asked — it's a default part of finishing the change, the same way a test
   function name or file layout choice is an architecture decision. The bar: would a different,
   equally reasonable engineer have plausibly made a different call here, and would future work
   need to know which way it went? If yes, log it.
+
+## 9. Test coverage — edge cases and security, not just the happy path
+
+Every feature's tests must cover more than "it works when everything is valid." Treat the
+following as a standard checklist for any new endpoint, form, or user-facing flow — not every
+item applies every time, but each one should be a deliberate decision to skip, not an oversight:
+
+- **Invalid/malformed input**: wrong types, missing required fields, extra unexpected fields,
+  malformed JSON, wrong content-type.
+- **Boundary values**: empty string vs. minimum-length string, exactly-at-limit vs.
+  one-over-the-limit (e.g. a field with a 200-char max gets tested at 200 and 201), zero vs.
+  negative numbers where only positive makes sense, empty arrays vs. arrays at/over a max size.
+- **Auth and authorization**: missing token, expired/malformed token, a valid token for the
+  *wrong* user attempting an action scoped to someone else (e.g. user A trying to read/modify
+  user B's resource by guessing/enumerating an id) — every ownership check needs a test proving
+  it's actually enforced, not just that the happy path works for the resource's real owner.
+- **Injection and untrusted-string handling**: any user-supplied string that reaches a SQL query,
+  a shell command, or gets echoed into a response should have a test asserting it's handled
+  safely (parameterized queries, no string concatenation) — a literal `'; DROP TABLE` or `<script>`
+  style payload in a test input is a legitimate and expected test case, not paranoia.
+- **Empty / null / oversized payloads**: an empty body where one is required, explicit `null` for
+  optional fields, a request body far larger than anything realistic.
+- **Duplicate / concurrent requests** where relevant: double-submitting the same create/mutate
+  request (idempotency), two requests racing to change the same row.
+- **Negative case for every validation rule** — if a rule says "X is required," there must be a
+  test proving X-missing is rejected, not just that X-present is accepted. A validation rule with
+  no test proving it actually rejects bad input is unverified, not implemented.
+
+This is a default expectation for every PR from here forward, at the same tier as the test-gating
+rule in section 5 — a PR that only tests the happy path is treated as under-tested, not done.
