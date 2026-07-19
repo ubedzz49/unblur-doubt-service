@@ -46,6 +46,21 @@ export function buildApp(
     logger: process.env.NODE_ENV === "test" ? false : { level: process.env.LOG_LEVEL ?? "info" },
   });
 
+  // Fastify's default JSON parser rejects an empty body when Content-Type: application/json is
+  // set, even for methods like DELETE that legitimately have no body -- our own frontend sends
+  // that header unconditionally on every request, so this bites any no-body call otherwise.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => {
+    if (body === "") {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   app.get("/healthz", async () => ({ status: "ok" }));
 
   app.post<{ Body: CreateDoubtBody }>("/doubts", async (request, reply) => {
