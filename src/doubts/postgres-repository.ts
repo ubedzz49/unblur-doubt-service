@@ -5,9 +5,10 @@ interface DoubtRow {
   id: string;
   author_user_id: string;
   title: string;
-  description: string;
+  description: string | null;
   expertise_level_id: string;
   status: DoubtStatus;
+  auto_detected: boolean;
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
@@ -21,6 +22,7 @@ function toDoubt(row: DoubtRow): Doubt {
     description: row.description,
     expertiseLevelId: row.expertise_level_id,
     status: row.status,
+    autoDetected: row.auto_detected,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     resolvedAt: row.resolved_at,
@@ -32,10 +34,10 @@ export class PostgresDoubtRepository implements DoubtRepository {
 
   async create(input: CreateDoubtInput): Promise<Doubt> {
     const result = await this.pool.query<DoubtRow>(
-      `INSERT INTO doubts (author_user_id, title, description, expertise_level_id)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO doubts (author_user_id, title, description, expertise_level_id, auto_detected)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [input.authorUserId, input.title, input.description, input.expertiseLevelId],
+      [input.authorUserId, input.title, input.description ?? null, input.expertiseLevelId, input.autoDetected ?? false],
     );
     return toDoubt(result.rows[0]);
   }

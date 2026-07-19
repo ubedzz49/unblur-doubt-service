@@ -4,9 +4,10 @@ export interface Doubt {
   id: string;
   authorUserId: string;
   title: string;
-  description: string;
+  description: string | null;
   expertiseLevelId: string;
   status: DoubtStatus;
+  autoDetected: boolean;
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
@@ -15,8 +16,9 @@ export interface Doubt {
 export interface CreateDoubtInput {
   authorUserId: string;
   title: string;
-  description: string;
+  description?: string;
   expertiseLevelId: string;
+  autoDetected?: boolean;
 }
 
 // optional feed filters, applied on top of the expertiseLevelIds/status match
@@ -42,7 +44,7 @@ function matchesFilters(doubt: Doubt, filters: FeedFilters | undefined): boolean
 
   if (filters.topic) {
     const needle = filters.topic.toLowerCase();
-    const haystack = `${doubt.title} ${doubt.description}`.toLowerCase();
+    const haystack = `${doubt.title} ${doubt.description ?? ""}`.toLowerCase();
     if (!haystack.includes(needle)) return false;
   }
 
@@ -63,9 +65,10 @@ export class InMemoryDoubtRepository implements DoubtRepository {
       id: crypto.randomUUID(),
       authorUserId: input.authorUserId,
       title: input.title,
-      description: input.description,
+      description: input.description ?? null,
       expertiseLevelId: input.expertiseLevelId,
       status: "open",
+      autoDetected: input.autoDetected ?? false,
       createdAt: now,
       updatedAt: now,
       resolvedAt: null,
