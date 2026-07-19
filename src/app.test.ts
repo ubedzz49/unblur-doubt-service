@@ -2,15 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 import { InMemoryDoubtRepository } from "./doubts/repository.js";
 import { FakeMatchingClient, MatchingClient } from "./matching/client.js";
-import { FakeInferenceClient, InferenceClient } from "./matching/infer-client.js";
-import { FakeTaxonomyClient, TaxonomyClient } from "./taxonomy/custom-client.js";
 import { InMemoryFeedCache } from "./cache/feed-cache.js";
 
 const validBody = {
   authorUserId: "11111111-1111-1111-1111-111111111111",
   title: "why does this integral diverge",
   description: "stuck on the improper integral in section 4",
-  expertiseLevelId: "22222222-2222-2222-2222-222222222222",
+  expertiseLevelIds: ["22222222-2222-2222-2222-222222222222"],
 };
 
 describe("GET /healthz", () => {
@@ -30,6 +28,36 @@ describe("POST /doubts", () => {
     const body = res.json();
     expect(body.status).toBe("open");
     expect(body.title).toBe(validBody.title);
+    expect(body.expertiseLevelIds).toEqual(validBody.expertiseLevelIds);
+    expect(body.autoDetected).toBeUndefined();
+  });
+
+  it("creates a doubt with multiple subject ids", async () => {
+    const app = buildApp();
+    const levelIds = [
+      "22222222-2222-2222-2222-222222222222",
+      "33333333-3333-3333-3333-333333333333",
+    ];
+    const res = await app.inject({
+      method: "POST",
+      url: "/doubts",
+      payload: { ...validBody, expertiseLevelIds: levelIds },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.expertiseLevelIds.sort()).toEqual([...levelIds].sort());
+  });
+
+  it("dedupes duplicate ids in the input without erroring", async () => {
+    const app = buildApp();
+    const levelId = "22222222-2222-2222-2222-222222222222";
+    const res = await app.inject({
+      method: "POST",
+      url: "/doubts",
+      payload: { ...validBody, expertiseLevelIds: [levelId, levelId] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().expertiseLevelIds).toEqual([levelId]);
   });
 
   it("rejects with a missing field", async () => {
@@ -56,116 +84,23 @@ describe("POST /doubts", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("400s with the new message when expertiseLevelId is missing and autoDetect is not set", async () => {
+  it("400s with the new message when expertiseLevelIds is missing", async () => {
     const app = buildApp();
-    const { expertiseLevelId, ...rest } = validBody;
+    const { expertiseLevelIds, ...rest } = validBody;
     const res = await app.inject({ method: "POST", url: "/doubts", payload: rest });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toBe("expertiseLevelId is required, or set autoDetect to true");
+    expect(res.json().error).toBe("at least one expertiseLevelId is required");
   });
 
-  describe("autoDetect", () => {
-    const matchedLevelId = "33333333-3333-3333-3333-333333333333";
-
-    it("creates a doubt using the matched expertise level and marks it auto-detected", async () => {
-      const inferenceClient = new FakeInferenceClient({
-        matched: true,
-        expertiseTypeId: "type-1",
-        expertiseLevelId: matchedLevelId,
-        label: "Calculus",
-        similarity: 0.92,
-      });
-      const app = buildApp(new InMemoryDoubtRepository(), new FakeMatchingClient(), new InMemoryFeedCache(), inferenceClient);
-
-      const { expertiseLevelId, ...rest } = validBody;
-      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
-      expect(res.statusCode).toBe(201);
-      const body = res.json();
-      expect(body.expertiseLevelId).toBe(matchedLevelId);
-      expect(body.autoDetected).toBe(true);
+  it("400s when expertiseLevelIds is an empty array", async () => {
+    const app = buildApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/doubts",
+      payload: { ...validBody, expertiseLevelIds: [] },
     });
-
-    it("when unmatched, calls the taxonomy client with the suggested label and uses its result", async () => {
-      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Quantum Foam Theory" });
-      const taxonomyClient = new FakeTaxonomyClient({
-        expertiseTypeId: "type-9",
-        expertiseLevelId: "level-9",
-        typeName: "Quantum Foam Theory",
-        levelName: "General",
-      });
-      const app = buildApp(
-        new InMemoryDoubtRepository(),
-        new FakeMatchingClient(),
-        new InMemoryFeedCache(),
-        inferenceClient,
-        taxonomyClient,
-      );
-
-      const { expertiseLevelId, ...rest } = validBody;
-      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
-      expect(res.statusCode).toBe(201);
-      const body = res.json();
-      expect(body.expertiseLevelId).toBe("level-9");
-      expect(body.autoDetected).toBe(true);
-      expect(taxonomyClient.calls).toHaveLength(1);
-      expect(taxonomyClient.calls[0].subjectName).toBe("Quantum Foam Theory");
-    });
-
-    it("forwards the Authorization header to the taxonomy client", async () => {
-      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Topology" });
-      const taxonomyClient = new FakeTaxonomyClient();
-      const app = buildApp(
-        new InMemoryDoubtRepository(),
-        new FakeMatchingClient(),
-        new InMemoryFeedCache(),
-        inferenceClient,
-        taxonomyClient,
-      );
-
-      const { expertiseLevelId, ...rest } = validBody;
-      await app.inject({
-        method: "POST",
-        url: "/doubts",
-        payload: { ...rest, autoDetect: true },
-        headers: { authorization: "Bearer test-token-123" },
-      });
-
-      expect(taxonomyClient.calls).toHaveLength(1);
-      expect(taxonomyClient.calls[0].authToken).toBe("Bearer test-token-123");
-    });
-
-    it("502s and creates no doubt when the inference call fails", async () => {
-      const repo = new InMemoryDoubtRepository();
-      const createSpy = vi.spyOn(repo, "create");
-      const throwingInference: InferenceClient = {
-        inferExpertise: async () => {
-          throw new Error("matching service unreachable");
-        },
-      };
-      const app = buildApp(repo, new FakeMatchingClient(), new InMemoryFeedCache(), throwingInference);
-
-      const { expertiseLevelId, ...rest } = validBody;
-      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
-      expect(res.statusCode).toBe(502);
-      expect(createSpy).not.toHaveBeenCalled();
-    });
-
-    it("502s and creates no doubt when inference succeeds but taxonomy creation fails", async () => {
-      const repo = new InMemoryDoubtRepository();
-      const createSpy = vi.spyOn(repo, "create");
-      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Astrophysics" });
-      const throwingTaxonomy: TaxonomyClient = {
-        createCustom: async () => {
-          throw new Error("user service unreachable");
-        },
-      };
-      const app = buildApp(repo, new FakeMatchingClient(), new InMemoryFeedCache(), inferenceClient, throwingTaxonomy);
-
-      const { expertiseLevelId, ...rest } = validBody;
-      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
-      expect(res.statusCode).toBe(502);
-      expect(createSpy).not.toHaveBeenCalled();
-    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("at least one expertiseLevelId is required");
   });
 });
 
@@ -241,13 +176,14 @@ describe("GET /feed", () => {
   const levelA = "aaaaaaaa-0000-0000-0000-000000000001";
   const levelB = "bbbbbbbb-0000-0000-0000-000000000002";
   const levelRelated = "cccccccc-0000-0000-0000-000000000003";
+  const levelUnrelated = "dddddddd-0000-0000-0000-000000000004";
 
-  async function seedDoubt(repo: InMemoryDoubtRepository, expertiseLevelId: string, title: string) {
+  async function seedDoubt(repo: InMemoryDoubtRepository, expertiseLevelIds: string[], title: string) {
     return repo.create({
       authorUserId: validBody.authorUserId,
       title,
       description: "desc",
-      expertiseLevelId,
+      expertiseLevelIds,
     });
   }
 
@@ -259,7 +195,33 @@ describe("GET /feed", () => {
 
   it("returns exact-only results when the matching client finds nothing related", async () => {
     const repo = new InMemoryDoubtRepository();
-    await seedDoubt(repo, levelA, "exact match doubt");
+    await seedDoubt(repo, [levelA], "exact match doubt");
+    const app = buildApp(repo, new FakeMatchingClient());
+
+    const res = await app.inject({ method: "GET", url: `/feed?expertiseLevelIds=${levelA}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].matchType).toBe("exact");
+  });
+
+  it("matches the feed via any one of a doubt's multiple tags, not just the first", async () => {
+    const repo = new InMemoryDoubtRepository();
+    await seedDoubt(repo, [levelUnrelated, levelA], "multi-tag doubt matching via second tag");
+    const app = buildApp(repo, new FakeMatchingClient());
+
+    const res = await app.inject({ method: "GET", url: `/feed?expertiseLevelIds=${levelA}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].matchType).toBe("exact");
+  });
+
+  it("counts a doubt as exact if any one tag qualifies, even with another unrelated tag", async () => {
+    const repo = new InMemoryDoubtRepository();
+    await seedDoubt(repo, [levelA, levelUnrelated], "doubt with one exact and one unrelated tag");
+    // matching client claims levelUnrelated is related to nothing relevant here; the point is
+    // the doubt should still be "exact" because levelA is in the viewer's set
     const app = buildApp(repo, new FakeMatchingClient());
 
     const res = await app.inject({ method: "GET", url: `/feed?expertiseLevelIds=${levelA}` });
@@ -271,8 +233,8 @@ describe("GET /feed", () => {
 
   it("includes related doubts tagged and ranked after exact ones", async () => {
     const repo = new InMemoryDoubtRepository();
-    await seedDoubt(repo, levelA, "exact doubt");
-    await seedDoubt(repo, levelRelated, "related doubt");
+    await seedDoubt(repo, [levelA], "exact doubt");
+    await seedDoubt(repo, [levelRelated], "related doubt");
     const matchingClient = new FakeMatchingClient({ [levelA]: [levelRelated] });
     const app = buildApp(repo, matchingClient);
 
@@ -287,8 +249,8 @@ describe("GET /feed", () => {
 
   it("does not double count a level already in the exact set as related", async () => {
     const repo = new InMemoryDoubtRepository();
-    await seedDoubt(repo, levelA, "doubt a");
-    await seedDoubt(repo, levelB, "doubt b");
+    await seedDoubt(repo, [levelA], "doubt a");
+    await seedDoubt(repo, [levelB], "doubt b");
     // matching client claims levelB is related to levelA, but levelB is already requested exactly
     const matchingClient = new FakeMatchingClient({ [levelA]: [levelB] });
     const app = buildApp(repo, matchingClient);
@@ -301,7 +263,7 @@ describe("GET /feed", () => {
 
   it("degrades gracefully to exact-only when the matching client throws", async () => {
     const repo = new InMemoryDoubtRepository();
-    await seedDoubt(repo, levelA, "exact doubt");
+    await seedDoubt(repo, [levelA], "exact doubt");
     const throwingClient: MatchingClient = {
       getRelatedLevelIds: async () => {
         throw new Error("matching service unreachable");
@@ -318,8 +280,8 @@ describe("GET /feed", () => {
 
   it("clamps limit below 1 up to the minimum of 1", async () => {
     const repo = new InMemoryDoubtRepository();
-    await seedDoubt(repo, levelA, "doubt 1");
-    await seedDoubt(repo, levelA, "doubt 2");
+    await seedDoubt(repo, [levelA], "doubt 1");
+    await seedDoubt(repo, [levelA], "doubt 2");
     const app = buildApp(repo, new FakeMatchingClient());
 
     const res = await app.inject({ method: "GET", url: `/feed?expertiseLevelIds=${levelA}&limit=0` });
@@ -330,7 +292,7 @@ describe("GET /feed", () => {
   it("clamps limit above 50 down to the maximum of 50 and caps total results at limit", async () => {
     const repo = new InMemoryDoubtRepository();
     for (let i = 0; i < 5; i++) {
-      await seedDoubt(repo, levelA, `doubt ${i}`);
+      await seedDoubt(repo, [levelA], `doubt ${i}`);
     }
     const app = buildApp(repo, new FakeMatchingClient());
 
@@ -349,13 +311,13 @@ describe("GET /feed", () => {
         authorUserId: validBody.authorUserId,
         title: "Integral calculus doubt",
         description: "stuck on convergence",
-        expertiseLevelId: levelA,
+        expertiseLevelIds: [levelA],
       });
       await repo.create({
         authorUserId: validBody.authorUserId,
         title: "Linear algebra doubt",
         description: "eigenvectors are confusing",
-        expertiseLevelId: levelA,
+        expertiseLevelIds: [levelA],
       });
       const app = buildApp(repo, new FakeMatchingClient());
 
@@ -368,7 +330,7 @@ describe("GET /feed", () => {
 
     it("excludes doubts that don't match the topic filter", async () => {
       const repo = new InMemoryDoubtRepository();
-      await seedDoubt(repo, levelA, "unrelated topic");
+      await seedDoubt(repo, [levelA], "unrelated topic");
       const app = buildApp(repo, new FakeMatchingClient());
 
       const res = await app.inject({ method: "GET", url: `/feed?expertiseLevelIds=${levelA}&topic=nonexistent` });
@@ -378,7 +340,7 @@ describe("GET /feed", () => {
 
     it("filters by createdAfter, excluding doubts created before it", async () => {
       const repo = new InMemoryDoubtRepository();
-      await seedDoubt(repo, levelA, "old doubt");
+      await seedDoubt(repo, [levelA], "old doubt");
       const app = buildApp(repo, new FakeMatchingClient());
 
       const future = new Date(Date.now() + 60_000).toISOString();
@@ -402,8 +364,8 @@ describe("GET /feed", () => {
 
     it("defaults to open-only but allows overriding status to resolved", async () => {
       const repo = new InMemoryDoubtRepository();
-      const openDoubt = await seedDoubt(repo, levelA, "open doubt");
-      const resolvedDoubt = await seedDoubt(repo, levelA, "resolved doubt");
+      const openDoubt = await seedDoubt(repo, [levelA], "open doubt");
+      const resolvedDoubt = await seedDoubt(repo, [levelA], "resolved doubt");
       await repo.updateStatus(resolvedDoubt.id, "resolved");
       const app = buildApp(repo, new FakeMatchingClient());
 
@@ -431,7 +393,7 @@ describe("GET /feed", () => {
   describe("caching", () => {
     it("a cache hit skips the repository and matching client entirely", async () => {
       const repo = new InMemoryDoubtRepository();
-      await seedDoubt(repo, levelA, "cached doubt");
+      await seedDoubt(repo, [levelA], "cached doubt");
       const matchingClient = new FakeMatchingClient();
       const listSpy = vi.spyOn(repo, "listByLevels");
       const relatedSpy = vi.spyOn(matchingClient, "getRelatedLevelIds");
@@ -454,8 +416,8 @@ describe("GET /feed", () => {
 
     it("a genuinely different query is a cache miss", async () => {
       const repo = new InMemoryDoubtRepository();
-      await seedDoubt(repo, levelA, "doubt a");
-      await seedDoubt(repo, levelB, "doubt b");
+      await seedDoubt(repo, [levelA], "doubt a");
+      await seedDoubt(repo, [levelB], "doubt b");
       const matchingClient = new FakeMatchingClient();
       const listSpy = vi.spyOn(repo, "listByLevels");
       const cache = new InMemoryFeedCache();
@@ -470,7 +432,7 @@ describe("GET /feed", () => {
 
     it("re-fetches after the cache TTL expires, using the injectable clock", async () => {
       const repo = new InMemoryDoubtRepository();
-      await seedDoubt(repo, levelA, "doubt a");
+      await seedDoubt(repo, [levelA], "doubt a");
       const matchingClient = new FakeMatchingClient();
       const listSpy = vi.spyOn(repo, "listByLevels");
 
