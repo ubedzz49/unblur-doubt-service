@@ -19,13 +19,38 @@ export interface CreateDoubtInput {
   expertiseLevelId: string;
 }
 
+// optional feed filters, applied on top of the expertiseLevelIds/status match
+export interface FeedFilters {
+  // free-text substring match against title OR description, case-insensitive
+  topic?: string;
+  // ISO 8601 date/datetime string -- only doubts created on/after this instant
+  createdAfter?: string;
+}
+
 export interface DoubtRepository {
   create(input: CreateDoubtInput): Promise<Doubt>;
   getById(id: string): Promise<Doubt | null>;
   updateStatus(id: string, status: DoubtStatus): Promise<Doubt | null>;
   listByAuthor(authorUserId: string): Promise<Doubt[]>;
-  // open doubts for the given expertise levels, newest first
-  listOpenByLevels(expertiseLevelIds: string[]): Promise<Doubt[]>;
+  // doubts for the given expertise levels and status, newest first, optionally
+  // narrowed by topic/createdAfter filters
+  listByLevels(expertiseLevelIds: string[], status: DoubtStatus, filters?: FeedFilters): Promise<Doubt[]>;
+}
+
+function matchesFilters(doubt: Doubt, filters: FeedFilters | undefined): boolean {
+  if (!filters) return true;
+
+  if (filters.topic) {
+    const needle = filters.topic.toLowerCase();
+    const haystack = `${doubt.title} ${doubt.description}`.toLowerCase();
+    if (!haystack.includes(needle)) return false;
+  }
+
+  if (filters.createdAfter) {
+    if (new Date(doubt.createdAt).getTime() < new Date(filters.createdAfter).getTime()) return false;
+  }
+
+  return true;
 }
 
 // test-only -- avoids CI needing real Postgres
@@ -72,10 +97,10 @@ export class InMemoryDoubtRepository implements DoubtRepository {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  async listOpenByLevels(expertiseLevelIds: string[]): Promise<Doubt[]> {
+  async listByLevels(expertiseLevelIds: string[], status: DoubtStatus, filters?: FeedFilters): Promise<Doubt[]> {
     const levelSet = new Set(expertiseLevelIds);
     return Array.from(this.rows.values())
-      .filter((d) => d.status === "open" && levelSet.has(d.expertiseLevelId))
+      .filter((d) => d.status === status && levelSet.has(d.expertiseLevelId) && matchesFilters(d, filters))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }

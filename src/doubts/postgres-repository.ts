@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { CreateDoubtInput, Doubt, DoubtRepository, DoubtStatus } from "./repository.js";
+import { CreateDoubtInput, Doubt, DoubtRepository, DoubtStatus, FeedFilters } from "./repository.js";
 
 interface DoubtRow {
   id: string;
@@ -66,13 +66,29 @@ export class PostgresDoubtRepository implements DoubtRepository {
     return result.rows.map(toDoubt);
   }
 
-  async listOpenByLevels(expertiseLevelIds: string[]): Promise<Doubt[]> {
+  async listByLevels(expertiseLevelIds: string[], status: DoubtStatus, filters?: FeedFilters): Promise<Doubt[]> {
     if (expertiseLevelIds.length === 0) return [];
+
+    // build the WHERE clause conditionally, always parameterized -- never string-interpolate
+    // user-supplied values into the SQL text
+    const conditions = ["status = $1", "expertise_level_id = ANY($2)"];
+    const params: unknown[] = [status, expertiseLevelIds];
+
+    if (filters?.topic) {
+      params.push(`%${filters.topic}%`);
+      conditions.push(`(title ILIKE $${params.length} OR description ILIKE $${params.length})`);
+    }
+
+    if (filters?.createdAfter) {
+      params.push(filters.createdAfter);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+
     const result = await this.pool.query<DoubtRow>(
       `SELECT * FROM doubts
-       WHERE status = 'open' AND expertise_level_id = ANY($1)
+       WHERE ${conditions.join(" AND ")}
        ORDER BY created_at DESC`,
-      [expertiseLevelIds],
+      params,
     );
     return result.rows.map(toDoubt);
   }
