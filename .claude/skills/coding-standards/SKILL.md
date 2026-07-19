@@ -119,3 +119,30 @@ separately below.
 - **Frontend**: this structured-logging rule is a backend expectation. The frontend's own runtime
   errors are handled via its normal error-boundary/toast patterns (see `FRONTEND_ARCHITECTURE.md`);
   don't bolt a backend-style structured logger onto client-side code.
+
+## 8. Architecture decisions get logged, by default, the same day
+
+Whenever a change is made to *how* the system is built rather than just *what* was added — a new
+shared-infra default (reusing a DB/cache/cluster vs. provisioning a new one), a new trust boundary
+(services trusting a gateway-verified header instead of re-verifying auth themselves), choosing
+one technical approach over another where a real alternative existed (embeddings vs. rule-based
+matching, ECS vs. App Runner, OIDC vs. static keys) — log it in `ARCHITECTURE_DECISIONS.md`
+(`~/Downloads/Unblur-Implementation/ARCHITECTURE_DECISIONS.md`) as its own entry: the decision,
+the reasoning, and what it changes for work that comes after it. Do this automatically, without
+being asked — it's a default part of finishing the change, the same way a test is.
+
+- **Don't wait to be asked.** If you're the one making the call (not just implementing something
+  the user explicitly specified down to the mechanism), write the entry before considering the
+  task done.
+- **Update `VERSION_PLAN.md` too, if the decision changes how a future version's own plan should
+  read** — e.g. deciding that services trust a gateway-injected `X-User-Id` header means every
+  future service's plan entry should say so, not silently rely on someone remembering the decision
+  lives in a separate file. See `VERSION_PLAN.md`'s Version 3 entry for the pattern to follow.
+- **A decision log entry is not a status update.** `STATUS.md` tracks what's done vs. remaining
+  and changes constantly; `ARCHITECTURE_DECISIONS.md` tracks *why things are built the way they
+  are* and should stay stable — write for someone reading it months later trying to understand why
+  a later choice was made a certain way, not for someone tracking this week's progress.
+- **Skip it for pure implementation detail with no real alternative considered** — not every
+  function name or file layout choice is an architecture decision. The bar: would a different,
+  equally reasonable engineer have plausibly made a different call here, and would future work
+  need to know which way it went? If yes, log it.
