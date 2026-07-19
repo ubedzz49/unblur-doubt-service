@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 import { InMemoryDoubtRepository } from "./doubts/repository.js";
 import { FakeMatchingClient, MatchingClient } from "./matching/client.js";
+import { FakeInferenceClient, InferenceClient } from "./matching/infer-client.js";
+import { FakeTaxonomyClient, TaxonomyClient } from "./taxonomy/custom-client.js";
 import { InMemoryFeedCache } from "./cache/feed-cache.js";
 
 const validBody = {
@@ -35,6 +37,135 @@ describe("POST /doubts", () => {
     const { title, ...rest } = validBody;
     const res = await app.inject({ method: "POST", url: "/doubts", payload: rest });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("creates a doubt when description is omitted", async () => {
+    const app = buildApp();
+    const { description, ...rest } = validBody;
+    const res = await app.inject({ method: "POST", url: "/doubts", payload: rest });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.title).toBe(validBody.title);
+    expect(body.description).toBeNull();
+  });
+
+  it("400s when description is omitted and title is also missing", async () => {
+    const app = buildApp();
+    const { description, title, ...rest } = validBody;
+    const res = await app.inject({ method: "POST", url: "/doubts", payload: rest });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("400s with the new message when expertiseLevelId is missing and autoDetect is not set", async () => {
+    const app = buildApp();
+    const { expertiseLevelId, ...rest } = validBody;
+    const res = await app.inject({ method: "POST", url: "/doubts", payload: rest });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("expertiseLevelId is required, or set autoDetect to true");
+  });
+
+  describe("autoDetect", () => {
+    const matchedLevelId = "33333333-3333-3333-3333-333333333333";
+
+    it("creates a doubt using the matched expertise level and marks it auto-detected", async () => {
+      const inferenceClient = new FakeInferenceClient({
+        matched: true,
+        expertiseTypeId: "type-1",
+        expertiseLevelId: matchedLevelId,
+        label: "Calculus",
+        similarity: 0.92,
+      });
+      const app = buildApp(new InMemoryDoubtRepository(), new FakeMatchingClient(), new InMemoryFeedCache(), inferenceClient);
+
+      const { expertiseLevelId, ...rest } = validBody;
+      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      expect(body.expertiseLevelId).toBe(matchedLevelId);
+      expect(body.autoDetected).toBe(true);
+    });
+
+    it("when unmatched, calls the taxonomy client with the suggested label and uses its result", async () => {
+      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Quantum Foam Theory" });
+      const taxonomyClient = new FakeTaxonomyClient({
+        expertiseTypeId: "type-9",
+        expertiseLevelId: "level-9",
+        typeName: "Quantum Foam Theory",
+        levelName: "General",
+      });
+      const app = buildApp(
+        new InMemoryDoubtRepository(),
+        new FakeMatchingClient(),
+        new InMemoryFeedCache(),
+        inferenceClient,
+        taxonomyClient,
+      );
+
+      const { expertiseLevelId, ...rest } = validBody;
+      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      expect(body.expertiseLevelId).toBe("level-9");
+      expect(body.autoDetected).toBe(true);
+      expect(taxonomyClient.calls).toHaveLength(1);
+      expect(taxonomyClient.calls[0].subjectName).toBe("Quantum Foam Theory");
+    });
+
+    it("forwards the Authorization header to the taxonomy client", async () => {
+      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Topology" });
+      const taxonomyClient = new FakeTaxonomyClient();
+      const app = buildApp(
+        new InMemoryDoubtRepository(),
+        new FakeMatchingClient(),
+        new InMemoryFeedCache(),
+        inferenceClient,
+        taxonomyClient,
+      );
+
+      const { expertiseLevelId, ...rest } = validBody;
+      await app.inject({
+        method: "POST",
+        url: "/doubts",
+        payload: { ...rest, autoDetect: true },
+        headers: { authorization: "Bearer test-token-123" },
+      });
+
+      expect(taxonomyClient.calls).toHaveLength(1);
+      expect(taxonomyClient.calls[0].authToken).toBe("Bearer test-token-123");
+    });
+
+    it("502s and creates no doubt when the inference call fails", async () => {
+      const repo = new InMemoryDoubtRepository();
+      const createSpy = vi.spyOn(repo, "create");
+      const throwingInference: InferenceClient = {
+        inferExpertise: async () => {
+          throw new Error("matching service unreachable");
+        },
+      };
+      const app = buildApp(repo, new FakeMatchingClient(), new InMemoryFeedCache(), throwingInference);
+
+      const { expertiseLevelId, ...rest } = validBody;
+      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
+      expect(res.statusCode).toBe(502);
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("502s and creates no doubt when inference succeeds but taxonomy creation fails", async () => {
+      const repo = new InMemoryDoubtRepository();
+      const createSpy = vi.spyOn(repo, "create");
+      const inferenceClient = new FakeInferenceClient({ matched: false, suggestedLabel: "Astrophysics" });
+      const throwingTaxonomy: TaxonomyClient = {
+        createCustom: async () => {
+          throw new Error("user service unreachable");
+        },
+      };
+      const app = buildApp(repo, new FakeMatchingClient(), new InMemoryFeedCache(), inferenceClient, throwingTaxonomy);
+
+      const { expertiseLevelId, ...rest } = validBody;
+      const res = await app.inject({ method: "POST", url: "/doubts", payload: { ...rest, autoDetect: true } });
+      expect(res.statusCode).toBe(502);
+      expect(createSpy).not.toHaveBeenCalled();
+    });
   });
 });
 
